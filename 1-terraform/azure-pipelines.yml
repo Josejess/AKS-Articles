@@ -1,82 +1,63 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+trigger:
+- master
 
-resources:
-- repo: self
+#variables:
+#  global_variable: value    # this is available to all jobs
 
-stages:
-- stage: Validate
-  jobs:
-  - job: Validate
-    continueOnError: false
-    steps:
-    - publish: 1-terraform
-      artifact: terraform_out
-    - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@0
-      displayName: 'Use Terraform v0.12.6'
-      inputs:
-        terraformVersion: 0.12.6
-    - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@0
-      displayName: 'terraform init'
-      inputs:
-        command: init
-        workingDirectory: 1-terraform
-        backendType: azurerm
-        backendServiceArm: 'Azure SPN'
-        backendAzureRmResourceGroupName: 'AKSTerraform-RG'
-        backendAzureRmStorageAccountName: 'nyuenterraformstate'
-        backendAzureRmContainerName: 'tfstate'
-        backendAzureRmKey: 'demo.terraform.tfstate'
-    - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@0
-      displayName: 'terraform validate'
-      inputs:
-        command: validate
-        workingDirectory: 1-terraform
- 
+jobs:
+- job: terraform_deployment
+  pool:
+    vmImage: ubuntu-latest
+  variables:
+    az_region: eastus
+    resource_group_name: JessAKSCICD
+    subscription: 5db7a2e4-25f1-4c0d-a100-d13e44d1f64f
+    key_vault_name: jesskeyvault1
+    sa_prefix: AksTerraformSPN
+    sa_container_name: jesscont
+    tfstateFile: terraform.tfstate
 
-- stage: Deploy
-  jobs:
-    # track deployments on the environment
-  - deployment: Deploy_Terraform
-    pool:
-      vmImage: 'ubuntu-latest'
-    # creates an environment if it doesn’t exist
-    environment: 'DEV'
-    strategy:
-      # default deployment strategy
-      runOnce:
-        deploy:
-          steps:
-          # - download: current
-          #   artifact: terraform_out
-          - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@0
-            displayName: 'terraform init'
-            inputs:
-              command: init
-              workingDirectory: $(Pipeline.Workspace)/terraform_out
-              backendType: azurerm
-              backendServiceArm: 'Azure SPN'
-              backendAzureRmResourceGroupName: 'AKSTerraform-RG'
-              backendAzureRmStorageAccountName: 'nyuenterraformstate'
-              backendAzureRmContainerName: 'tfstate'
-              backendAzureRmKey: 'demo.terraform.tfstate'
-          - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@0
-            displayName: 'terraform plan'
-            inputs:
-              command: plan
-              workingDirectory: $(Pipeline.Workspace)/terraform_out
-              environmentServiceName: 'Azure SPN'
-              secureVarsFile: 'aks_conf.tfvars'
-              commandOptions: '-out $(Pipeline.Workspace)/terraform_out/terraform_aks_out'
-              terraformVersion: 0.12.6
-          - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-cli.TerraformCLI@0
-            displayName: 'terraform apply'
-            inputs:
-              command: apply
-              workingDirectory: $(Pipeline.Workspace)/terraform_out
-              environmentServiceName: 'Azure SPN'
-              commandOptions: '$(Pipeline.Workspace)/terraform_out/terraform_aks_out'
-              terraformVersion: 0.12.6
-            
+  steps:
+  - task: AzureCLI@2
+    inputs:
+      azureSubscription: '5db7a2e4-25f1-4c0d-a100-d13e44d1f64f' #replace with your service connection - azure resource manager service principal
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        az group create -n $(resource_group_name) -l $(az_region)
+        VAULT_ID=$(az keyvault create --name "$(key_vault_name)" --resource-group "$(resource_group_name)" --location "$(az_region)" --query "id" -o tsv)
+        az storage account create --resource-group $(resource_group_name) --name "$(sa_prefix)" --sku Standard_LRS --encryption-services blob
+        az storage container create --name $(sa_container_name) --account-name "$(sa_prefix)" --auth-mode login
+  - task: TerraformInstaller@0
+    displayName: Terraform Installation
+    inputs:
+      terraformVersion: 'latest'
+  - task: TerraformTaskV3@3
+    displayName: Terraform Init
+    inputs:
+      provider: 'azurerm'
+      command: 'init'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/tf-files'
+      backendServiceArm: '<service-connection-auth>'
+      backendAzureRmResourceGroupName: '$(resource_group_name)'
+      backendAzureRmStorageAccountName: '$(sa_prefix)'
+      backendAzureRmContainerName: '$(sa_container_name)'
+      backendAzureRmKey: '$(tfstateFile)'
+
+  - task: TerraformTaskV3@3
+    displayName: Terraform Plan
+    inputs:
+      provider: 'azurerm'
+      command: 'plan'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/tf-files'
+      commandOptions: '-out=tfplan'
+      environmentServiceNameAzureRM: 'akrish-poc-sp'
+
+  - task: TerraformTaskV3@3
+    displayName: Terraform Apply
+    inputs:
+      provider: 'azurerm'
+      command: 'apply'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/tf-files'
+      commandOptions: 'tfplan'
+      environmentServiceNameAzureRM: '<service-connection-auth>'
